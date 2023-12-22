@@ -1,0 +1,2 @@
+# hobot_environmental_understanding
+hobot environmental understanding node
