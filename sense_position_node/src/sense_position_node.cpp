@@ -20,17 +20,20 @@ SensePositionNode::SensePositionNode(const std::string &node_name, const NodeOpt
     this->declare_parameter<std::string>("ai_msg_sub_topic_name", ai_msg_sub_topic_name_);
     this->declare_parameter<std::string>("depth_img_topic_name", depth_img_topic_name_);
     this->declare_parameter<std::string>("server_name", server_name_);
+    this->declare_parameter<std::string>("camera_link_name", camera_link_name_);
 
     this->get_parameter<std::string>("ai_msg_sub_topic_name", ai_msg_sub_topic_name_);
     this->get_parameter<std::string>("depth_img_topic_name", depth_img_topic_name_);
     this->get_parameter<std::string>("server_name", server_name_);
+    this->get_parameter<std::string>("camera_link_name", camera_link_name_);
   
     {
       std::stringstream ss;
       ss << "Parameter:"
         << "\n ai_msg_sub_topic_name: " << ai_msg_sub_topic_name_
         << "\n depth_img_topic_name: " << depth_img_topic_name_
-        << "\n server_name: " << server_name_;
+        << "\n server_name: " << server_name_
+        << "\n camera_link_name: " << camera_link_name_;
       RCLCPP_WARN(rclcpp::get_logger("sense_position"), "%s", ss.str().c_str());
     }
 
@@ -175,7 +178,7 @@ int SensePositionNode::UpdateTransform(sensor_msgs::msg::Image::SharedPtr frame_
       geometry_msgs::msg::TransformStamped base_target_transform;
       base_target_transform.header.stamp = stamp;
       base_target_transform.transform = transform;
-      base_target_transform.header.frame_id = "rgbd_link";
+      base_target_transform.header.frame_id = camera_link_name_;
       base_target_transform.child_frame_id = child_frame_id;
 
       geometry_msgs::msg::TransformStamped map_target_transform;
@@ -224,7 +227,7 @@ int SensePositionNode::Listener() {
   echoListener echoListener(clock);
 
   std::string source_frameid = "map";
-  std::string target_frameid = "rgbd_link";
+  std::string target_frameid = camera_link_name_;
 
   // Wait for the first transforms to become avaiable.
   std::string warning_msg;
