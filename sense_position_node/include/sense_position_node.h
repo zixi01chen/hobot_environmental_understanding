@@ -105,8 +105,8 @@ class SensePositionNode : public rclcpp::Node {
   // 通过2D结果与深度图计算目标姿态信息
   int CalculateTransform(int x, int y, float depth_value, geometry_msgs::msg::Transform& transform);
 
-  // // 更正目标的坐标系并记录
-  // int CorrectTransform(geometry_msgs::msg::TransformStamped& transform);
+  // 更正目标的坐标系并记录
+  int CorrectTransform(geometry_msgs::msg::TransformStamped& transform);
 
  private:
 

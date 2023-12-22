@@ -80,9 +80,8 @@ void SensePositionNode::ServiceRequest(
 
   for (auto targetTF: targetTFs_) {
     if (targetTF.child_frame_id == request_type) {
-      // response->type = request->type;
       response->success = true;
-      response->dis_isvalid = false;
+      response->dis_isvalid = true;
       response->dis_x = targetTF.transform.translation.x;
       response->dis_y = targetTF.transform.translation.y;
       
@@ -91,14 +90,14 @@ void SensePositionNode::ServiceRequest(
       response->goal.pose.position.z = targetTF.transform.translation.z;
       response->goal.pose.orientation = targetTF.transform.rotation;
       
-      server_->send_response(request_header, response);
+      server_->send_response(*request_header, *response);
       return;
     }
   }
 
   response->success = false;
   // 发送响应
-  server_->send_response(request_header, response);
+  server_->send_response(*request_header, *response);
 }
 
 int SensePositionNode::Main() {
