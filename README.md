@@ -37,3 +37,14 @@
   # source 你的ROS工程包
   ros2 run sense_position sense_position
 ```
+### originbot_gazebo
+
+功能：
+  - 基于 originbot 小车仿真
+
+运行：
+```shell
+  source /opt/ros/foxy/setup.bash
+  # source 你的ROS工程包
+  ros2 launch originbot_gazebo originbot_with_rgbd_navigation_gazebo.launch.py
+```
