@@ -94,8 +94,8 @@ class SensePositionNode : public rclcpp::Node {
   // 发布TF订阅消息
   int Broadcaster(geometry_msgs::msg::TransformStamped tf_msg);
 
-  // 主程序
-  int Main();
+  // 消息处理程序
+  void MessageProcess();
 
   // 更新坐标系
   int UpdateTransform(sensor_msgs::msg::Image::SharedPtr frame_msg, 
@@ -106,13 +106,27 @@ class SensePositionNode : public rclcpp::Node {
   int CalculateTransform(int x, int y, float depth_value, geometry_msgs::msg::Transform& transform);
 
   // 更正目标的坐标系并记录
-  int CorrectTransform(geometry_msgs::msg::TransformStamped& transform);
+  int CorrectTransform(geometry_msgs::msg::TransformStamped& targetTF);
+
+  // 判断两个坐标系是否重叠
+  bool CheckSameTransform(geometry_msgs::msg::TransformStamped& tf1,
+                        geometry_msgs::msg::TransformStamped& tf2);
+
+  // 计算两个坐标系空间距离
+  double CalculateDistance(geometry_msgs::msg::TransformStamped& tf1,
+                        geometry_msgs::msg::TransformStamped& tf2);
 
  private:
 
   std::shared_ptr<std::thread> listener_thread_ = nullptr;
+  std::shared_ptr<std::thread> worker_ = nullptr;
+
+  rclcpp::Node::SharedPtr nh_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Service<hobot_autonomous_moving_msgs::srv::GetLocation>::SharedPtr server_;
+  bool map_stop_ = false;
+  std::condition_variable map_smart_condition_;
+  std::mutex map_smart_mutex_;
 
   std::string server_name_ = "/get_target_and_position";
   std::string camera_link_name_ = "rgbd_link";
@@ -134,7 +148,8 @@ class SensePositionNode : public rclcpp::Node {
   std::priority_queue<geometry_msgs::msg::TransformStamped,
                       std::vector<geometry_msgs::msg::TransformStamped>,
                       compare_tf> tf_msgs_;
-
+  
+  geometry_msgs::msg::TransformStamped current_position_;
   std::vector<geometry_msgs::msg::TransformStamped> targetTFs_;
 
   void SmartTopicCallback(

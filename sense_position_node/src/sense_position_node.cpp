@@ -14,6 +14,10 @@
 
 #include "include/sense_position_node.h"
 
+bool isSubset(const std::string& strA, const std::string& strB) {
+    return strB.find(strA) != std::string::npos;
+}
+
 SensePositionNode::SensePositionNode(const std::string &node_name, const NodeOptions &options)
     : rclcpp::Node(node_name, options) {
 
@@ -54,9 +58,8 @@ SensePositionNode::SensePositionNode(const std::string &node_name, const NodeOpt
                     std::placeholders::_1));
 
     listener_thread_ = std::make_shared<std::thread>(&SensePositionNode::Listener, this);
-
-    timer_ = create_wall_timer(std::chrono::milliseconds(100),
-                            std::bind(&SensePositionNode::Main, this));
+  
+    worker_ = std::make_shared<std::thread>(std::bind(&SensePositionNode::MessageProcess, this));
 
     // 创建一个服务并指定回调函数
     server_ = create_service<hobot_autonomous_moving_msgs::srv::GetLocation>(
@@ -64,8 +67,44 @@ SensePositionNode::SensePositionNode(const std::string &node_name, const NodeOpt
     
 }
 
-SensePositionNode::~SensePositionNode() {}
+SensePositionNode::~SensePositionNode() {
+  {
+    if (worker_ && worker_->joinable()) {
+      map_stop_ = true;
+      map_smart_condition_.notify_one();
+      worker_->join();
+      worker_ = nullptr;
+      RCLCPP_INFO(nh_->get_logger(), "sense_position stop worker");
+    }
+    {
+      std::unique_lock<std::mutex> lock(map_smart_mutex_);
+      while (!frames_.empty()) {
+        frames_.pop();
+      }
+    }
+    {
+      std::unique_lock<std::mutex> lock(map_smart_mutex_);
+      while (!smart_msgs_.empty()) {
+        smart_msgs_.pop();
+      }
+    }
+    {
+      std::unique_lock<std::mutex> lock(map_smart_mutex_);
+      while (!tf_msgs_.empty()) {
+        tf_msgs_.pop();
+      }
+    }
+  }
 
+}
+
+/**
+ * @brief 处理获取位置服务请求的函数
+ * 
+ * @param request_header 客户端请求头信息
+ * @param request 客户端发送的请求数据
+ * @param response 用于设置服务端的响应数据
+ */
 void SensePositionNode::ServiceRequest(
   const std::shared_ptr<rmw_request_id_t> request_header,
   const std::shared_ptr<hobot_autonomous_moving_msgs::srv::GetLocation::Request> request,
@@ -76,10 +115,28 @@ void SensePositionNode::ServiceRequest(
   // response 用于设置服务端的响应数据
   // 可以通过设置 response->result = ... 来填充响应数据
 
-  std::string request_type = request->type + "_frame";
+  // 初始化请求类型和重叠距离
+  std::string request_type;
+  double overlap = 10000.0;
 
+  // 遍历目标坐标系列表
+  for (auto targetTF: targetTFs_) {
+    // 判断请求类型是否是当前目标坐标系的子集
+    if (isSubset(request->type, targetTF.child_frame_id)) {
+      // 计算当前位置到目标坐标系的距离
+      double distance = CalculateDistance(current_position_, targetTF);
+      // 更新最小距离和对应的请求类型
+      if (distance < overlap) {
+        overlap = distance;
+        request_type = targetTF.child_frame_id;
+      }
+    }
+  }
+  
+  // 根据最小距离找到对应的目标坐标系
   for (auto targetTF: targetTFs_) {
     if (targetTF.child_frame_id == request_type) {
+      // 填充响应数据
       response->success = true;
       response->dis_isvalid = true;
       response->dis_x = targetTF.transform.translation.x;
@@ -90,55 +147,77 @@ void SensePositionNode::ServiceRequest(
       response->goal.pose.position.z = targetTF.transform.translation.z;
       response->goal.pose.orientation = targetTF.transform.rotation;
       
+      // 发送成功的响应
       server_->send_response(*request_header, *response);
       return;
     }
   }
 
+  // 若未找到匹配的目标坐标系，发送失败的响应
   response->success = false;
-  // 发送响应
   server_->send_response(*request_header, *response);
 }
 
-int SensePositionNode::Main() {
 
-  while(!smart_msgs_.empty() && !frames_.empty() && !tf_msgs_.empty()) {
-    auto msg = smart_msgs_.top();
-    auto frame = frames_.top();
-    if (msg->header.stamp == frame->header.stamp) {
-
-      geometry_msgs::msg::TransformStamped tf_msg;
-      while(!tf_msgs_.empty() && 
-            (msg->header.stamp.sec > tf_msgs_.top().header.stamp.sec) ||
-            ((msg->header.stamp.sec == tf_msgs_.top().header.stamp.sec) &&
-            (msg->header.stamp.nanosec >
-              tf_msgs_.top().header.stamp.nanosec))) {
-        tf_msg = tf_msgs_.top();
-        tf_msgs_.pop();
-      } 
-
-      int ret = UpdateTransform(frame, msg, tf_msg);
-      if (ret != 0) {
-        RCLCPP_ERROR(rclcpp::get_logger("sense_position"), "transform update failed!");  
-        return -1;
-      }
-      smart_msgs_.pop();
-      frames_.pop();
+/**
+ * @brief 处理消息的函数
+ * 
+ * @details 该函数用于处理智能消息、帧和坐标变换消息的同步，确保它们在时间上的匹配。
+ *          在消息队列非空的情况下，通过等待条件变量触发消息处理。
+ * 
+ * @note 该函数在一个循环中运行，直到收到停止信号（map_stop_为true）。
+ */
+void SensePositionNode::MessageProcess() {
+  while (!map_stop_) {
+    // 使用互斥锁等待条件变量触发
+    std::unique_lock<std::mutex> lock(map_smart_mutex_);
+    map_smart_condition_.wait(lock);
+    
+    // 若收到停止信号，则退出循环
+    if (map_stop_) {
       break;
+    }
 
-    } else if ((msg->header.stamp.sec > frame->header.stamp.sec) ||
-                ((msg->header.stamp.sec == frame->header.stamp.sec) &&
-                (msg->header.stamp.nanosec >
-                  frame->header.stamp.nanosec))) {
-      frames_.pop();
-      // RCLCPP_INFO(rclcpp::get_logger("sense_position"), "frames_.pop()");
-    } else {
-      smart_msgs_.pop();
-      // RCLCPP_INFO(rclcpp::get_logger("sense_position"), "smart_msgs_.pop()");
+    // 处理智能消息、帧和坐标变换消息的同步
+    while (!smart_msgs_.empty() && !frames_.empty() && !tf_msgs_.empty()) {
+      auto msg = smart_msgs_.top();
+      auto frame = frames_.top();
+
+      // 判断智能消息和帧的时间戳是否匹配
+      if (msg->header.stamp == frame->header.stamp) {
+        geometry_msgs::msg::TransformStamped tf_msg;
+
+        // 处理坐标变换消息，确保其时间戳不早于当前智能消息的时间戳
+        while (!tf_msgs_.empty() && 
+               ((msg->header.stamp.sec > tf_msgs_.top().header.stamp.sec) ||
+                ((msg->header.stamp.sec == tf_msgs_.top().header.stamp.sec) &&
+                 (msg->header.stamp.nanosec > tf_msgs_.top().header.stamp.nanosec)))) {
+          tf_msg = tf_msgs_.top();
+          tf_msgs_.pop();
+        } 
+
+        // 更新坐标变换并处理完成的消息
+        lock.unlock();
+        int ret = UpdateTransform(frame, msg, tf_msg);
+        if (ret != 0) {
+          RCLCPP_ERROR(rclcpp::get_logger("sense_position"), "transform update failed!");
+        }
+        lock.lock();
+        smart_msgs_.pop();
+        frames_.pop();
+      } else if ((msg->header.stamp.sec > frame->header.stamp.sec) ||
+                 ((msg->header.stamp.sec == frame->header.stamp.sec) &&
+                  (msg->header.stamp.nanosec > frame->header.stamp.nanosec))) {
+        // 当前智能消息较新，丢弃帧
+        frames_.pop();
+      } else {
+        // 当前帧较新，丢弃智能消息
+        smart_msgs_.pop();
+      }
     }
   }
-
 }
+
 
 int SensePositionNode::UpdateTransform(sensor_msgs::msg::Image::SharedPtr frame_msg, 
                   ai_msgs::msg::PerceptionTargets::SharedPtr smart_msg,
@@ -199,7 +278,7 @@ int SensePositionNode::UpdateTransform(sensor_msgs::msg::Image::SharedPtr frame_
       auto translation = map_target_transform.transform.translation;
       auto rotation = map_target_transform.transform.rotation;
 
-      ss << "- Target Frame: " << child_frame_id << "\n";
+      ss << "- Target Frame: " << map_target_transform.child_frame_id << "\n";
       ss << "- Header: [" << map_target_transform.header.stamp.sec << " " << map_target_transform.header.stamp.nanosec << "\n";
       ss << "- Translation: [" << translation.x << ", " << translation.y << ", " << translation.z << "]" << "\n";
       ss << "- Rotation: in Quaternion [" << rotation.x << ", " << rotation.y << ", " 
@@ -214,55 +293,57 @@ int SensePositionNode::UpdateTransform(sensor_msgs::msg::Image::SharedPtr frame_
   return 0;             
 }
 
+/**
+ * @brief 监听坐标变换的函数
+ * 
+ * @return 成功返回0，否则返回错误码
+ */
 int SensePositionNode::Listener() {
+  // 设置监听频率
   double rate_hz = 1.0;
-
   rclcpp::Rate rate(rate_hz);
 
+  // 创建ROS 2节点
   rclcpp::Node::SharedPtr nh = rclcpp::Node::make_shared("tf2_echo");
-
   rclcpp::Clock::SharedPtr clock = nh->get_clock();
-  //Instantiate a local listener
+
+  // 实例化本地监听器
   echoListener echoListener(clock);
 
+  // 设置源坐标系和目标坐标系
   std::string source_frameid = "map";
   std::string target_frameid = camera_link_name_;
 
-  // Wait for the first transforms to become avaiable.
+  // 等待第一个坐标变换可用
   std::string warning_msg;
   while (rclcpp::ok() && !echoListener.buffer_.canTransform(
     source_frameid, target_frameid, tf2::TimePoint(), &warning_msg))
   {
-    RCLCPP_INFO_THROTTLE(nh->get_logger(), *clock, 1000, "Waiting for transform %s ->  %s: %s",
+    RCLCPP_INFO_THROTTLE(nh->get_logger(), *clock, 1000, "等待坐标变换 %s ->  %s: %s",
       source_frameid.c_str(), target_frameid.c_str(), warning_msg.c_str());
     rate.sleep();
   }
 
-  //Nothing needs to be done except wait for a quit
-  //The callbacks withing the listener class
-  //will take care of everything
+  // 监听坐标变换并将其加入队列
   while(rclcpp::ok()) {
     try {
       geometry_msgs::msg::TransformStamped echo_transform;
       echo_transform = echoListener.buffer_.lookupTransform(source_frameid, target_frameid, tf2::TimePoint());
-
-      tf_msgs_.push(echo_transform);
-      if (tf_msgs_.size() > 100) {
-        tf_msgs_.pop();
-        RCLCPP_WARN(rclcpp::get_logger("sense_position"),
-                    "visual understanding node has cache tf message num > 100, drop the "
-                    "oldest tf message");
+      current_position_ = echo_transform;
+       
+       // 使用互斥锁确保对消息队列的安全访问
+      {
+        std::unique_lock<std::mutex> lock(map_smart_mutex_);
+        tf_msgs_.push(echo_transform);
+        if (tf_msgs_.size() > 100) {
+          tf_msgs_.pop();
+          RCLCPP_WARN(rclcpp::get_logger("sense_position"),
+                      "visual understanding node has cache tf message num > 100, drop the "
+                      "oldest tf message");
+        }
+        // 通知处理线程有新消息可处理
+        map_smart_condition_.notify_one();
       }
-
-      // std::cout.precision(3);
-      // std::cout.setf(std::ios::fixed,std::ios::floatfield);
-      // std::cout << "At time " << echo_transform.header.stamp.sec << "." << echo_transform.header.stamp.nanosec << std::endl;
-
-      // auto translation = echo_transform.transform.translation;
-      // auto rotation = echo_transform.transform.rotation;
-      // std::cout << "- Translation: [" << translation.x << ", " << translation.y << ", " << translation.z << "]" << std::endl;
-      // std::cout << "- Rotation: in Quaternion [" << rotation.x << ", " << rotation.y << ", " 
-      //           << rotation.z << ", " << rotation.w << "]" << std::endl;
 
     } catch(tf2::TransformException& ex) {
       std::stringstream ss;
@@ -272,15 +353,22 @@ int SensePositionNode::Listener() {
       ss << echoListener.buffer_.allFramesAsString();
       RCLCPP_ERROR(rclcpp::get_logger("sense_position"), "%s", ss.str().c_str());
     }
+    // 控制监听频率
     rate.sleep();
   }
 
   return 0;
 }
 
+/**
+ * @brief 广播坐标变换消息的函数
+ * 
+ * @param tf_msg 待广播的坐标变换消息
+ * @return 成功返回0，否则返回错误码
+ */
 int SensePositionNode::Broadcaster(geometry_msgs::msg::TransformStamped tf_msg) {
 
-  // check frame_id != child_frame_id
+  // 检查 frame_id 和 child_frame_id 是否相同
   if (tf_msg.header.frame_id == tf_msg.child_frame_id) {
     RCLCPP_ERROR(this->get_logger(),
       "cannot publish static transform from '%s' to '%s', exiting",
@@ -288,64 +376,106 @@ int SensePositionNode::Broadcaster(geometry_msgs::msg::TransformStamped tf_msg) 
     throw std::runtime_error("child_frame_id cannot equal frame_id");
   }
 
+  // 创建静态坐标变换广播器
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> broadcaster_;
   broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
 
+  // 发送坐标变换消息
   broadcaster_->sendTransform(tf_msg);
 
+  // 打印更新成功的日志信息
   RCLCPP_INFO(rclcpp::get_logger("sense_position"), "update success");
+
   return 0;
 }
 
+/**
+ * @brief 深度图像消息的回调函数
+ * 
+ * @param msg 深度图像消息
+ */
 void SensePositionNode::DepthImgTopicCallback(
-  const sensor_msgs::msg::Image::SharedPtr msg) {
+    const sensor_msgs::msg::Image::SharedPtr msg) {
 
+  // 使用互斥锁确保对消息队列的安全访问
+  std::unique_lock<std::mutex> lock(map_smart_mutex_);
+
+  // 将接收到的深度图像消息加入队列
   frames_.push(msg);
-  RCLCPP_INFO(rclcpp::get_logger("sense_position"),
-              "frames_ size %d",
-              frames_.size());
+
+  // 控制消息队列长度，保持不超过100条，超过则丢弃最旧的消息
   if (frames_.size() > 100) {
     frames_.pop();
     RCLCPP_WARN(rclcpp::get_logger("sense_position"),
                 "visual understanding node has cache image num > 100, drop the oldest "
                 "image message");
   }
+  // 通知处理线程有新消息可处理
+  map_smart_condition_.notify_one();
 }
 
+/**
+ * @brief 智能感知消息的回调函数
+ * 
+ * @param msg 智能感知消息
+ */
 void SensePositionNode::SmartTopicCallback(
     const ai_msgs::msg::PerceptionTargets::SharedPtr msg) {
+  {
+    // 使用互斥锁确保对消息队列的安全访问
+    std::unique_lock<std::mutex> lock(map_smart_mutex_);
 
-  if (smart_msgs_.empty()) {
-    smart_msgs_.push(msg);
-  }
+    // 将接收到的智能感知消息加入队列
+    if (smart_msgs_.empty()) {
+      smart_msgs_.push(msg);
+    }
 
-  if (smart_msgs_.size() > 100) {
-    smart_msgs_.pop();
-    RCLCPP_WARN(rclcpp::get_logger("sense_position"),
-                "visual understanding node has cache smart message num > 100, drop the "
-                "oldest smart message");
+    // 控制消息队列长度，保持不超过100条，超过则丢弃最旧的消息
+    if (smart_msgs_.size() > 100) {
+      smart_msgs_.pop();
+      RCLCPP_WARN(rclcpp::get_logger("sense_position"),
+                  "visual understanding node has cache smart message num > 100, drop the "
+                  "oldest smart message");
+    }
+    
+    // 通知处理线程有新消息可处理
+    map_smart_condition_.notify_one();
   }
 }
 
 
+/**
+ * @brief 根据像素坐标和深度值计算坐标变换的函数
+ * 
+ * @param x 横向像素坐标
+ * @param y 纵向像素坐标
+ * @param depth_value 深度值
+ * @param transform 计算得到的坐标变换结果
+ * @return 成功返回0，否则返回错误码
+ */
 int SensePositionNode::CalculateTransform(int x, int y, float depth_value, geometry_msgs::msg::Transform& transform) {
   
+  // 相机参数
   double fx = 554.254691191187;  // 焦距 x
   double fy = 554.254691191187;  // 焦距 y
   double cx = 320.5;             // 光心 x
   double cy = 240.5;             // 光心 y
 
+  // 像素坐标转换为相机坐标
   double pointx = (x - cx) * depth_value / fx;
   double pointy = (y - cy) * depth_value / fy;
   double pointz = depth_value;
 
+  // 相机坐标转换为目标坐标系坐标
   float targetX = static_cast<float>(pointz);
   float targetY = static_cast<float>(-pointx);
   float targetZ = static_cast<float>(pointy);
 
+  // 保留两位小数
   targetX = static_cast<float>(static_cast<int>(targetX * 100)) / 100.0;
   targetY = static_cast<float>(static_cast<int>(targetY * 100)) / 100.0;
 
+  // 填充坐标变换结果
   transform.translation.x = targetX;
   transform.translation.y = targetY;
   transform.translation.z = 0.0;
@@ -357,19 +487,103 @@ int SensePositionNode::CalculateTransform(int x, int y, float depth_value, geome
   return 0;
 }
 
-int SensePositionNode::CorrectTransform(geometry_msgs::msg::TransformStamped& transform) {
-  
-  if (targetTFs_.empty()) {
-    targetTFs_.push_back(transform);
-    return 0;
-  }
+/**
+ * @brief 修正坐标变换的函数
+ * 
+ * @param tempTF 待修正的坐标变换消息（传入引用，将被修改）
+ * @return 成功返回0，否则返回错误码
+ */
+int SensePositionNode::CorrectTransform(geometry_msgs::msg::TransformStamped& tempTF) {
 
-  for (auto targetTF: targetTFs_) {
-    if (targetTF.child_frame_id == transform.child_frame_id) {
+  // 更新目标物体的朝向角，使其与机器人视角朝向相同
+  double Xa = current_position_.transform.translation.x;
+  double Ya = current_position_.transform.translation.y;
+  double Xb = tempTF.transform.translation.x;
+  double Yb = tempTF.transform.translation.y;
+  double theta = atan2((Yb - Ya), (Xb - Xa)); // 计算朝向角
+  tempTF.transform.rotation.z = sin(theta / 2.0);
+  tempTF.transform.rotation.w = cos(theta / 2.0);
+
+  // 遍历目标坐标系列表
+  for (auto targetTF : targetTFs_) {
+    // 判断修正后的坐标变换是否与已知坐标系匹配
+    if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id) && CheckSameTransform(tempTF, targetTF)) {
+      // 若匹配，则更新坐标系标识和位置信息（取平均）
+      tempTF.child_frame_id = targetTF.child_frame_id;
+      tempTF.transform.translation.x = (tempTF.transform.translation.x + targetTF.transform.translation.x) / 2;
+      tempTF.transform.translation.y = (tempTF.transform.translation.y + targetTF.transform.translation.y) / 2;
+      tempTF.transform.translation.z = (tempTF.transform.translation.z + targetTF.transform.translation.z) / 2;
       return 0;
     }
   }
-  targetTFs_.push_back(transform);
 
+  // 若未找到匹配的已知坐标系，生成新的坐标系标识
+  int count = 0;
+  for (auto targetTF : targetTFs_) {
+    if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id)) {
+      count++;
+    }
+  }
+  if (count != 0) {
+    tempTF.child_frame_id = tempTF.child_frame_id + "_" + std::to_string(count);
+  } 
+
+  // 将修正后的坐标变换添加到目标坐标系列表
+  targetTFs_.push_back(tempTF);
   return 0;
+}
+
+
+/**
+ * @brief 检查两个坐标变换是否相似的函数
+ * 
+ * @param tf1 第一个坐标变换
+ * @param tf2 第二个坐标变换
+ * @return 如果两坐标变换相似，返回true；否则返回false
+ */
+bool SensePositionNode::CheckSameTransform(geometry_msgs::msg::TransformStamped& tf1,
+                                          geometry_msgs::msg::TransformStamped& tf2) {
+  
+  // 初始化重叠阈值，默认为0.2
+  double overlap_threshold = 0.2;
+
+  // 根据坐标变换类型调整重叠阈值
+  std::string type = tf1.child_frame_id;
+  if (type == "trash_frame") {
+    overlap_threshold = 1.0;
+  } else if (type == "round_frame") {
+    overlap_threshold = 0.2;
+  }
+
+  // 计算两坐标变换之间的欧几里得距离
+  double distance = CalculateDistance(tf1, tf2);
+
+  // 打印调试信息，显示两坐标变换之间的距离
+  std::cout << tf1.child_frame_id << " " << tf2.child_frame_id << " distance: " << distance << std::endl;
+
+  // 判断距离是否小于重叠阈值，若是，则认为相似
+  if (distance < overlap_threshold) {
+    return true;
+  }
+
+  // 若距离大于等于重叠阈值，则认为不相似
+  return false;
+}
+
+
+/**
+ * @brief 计算两个坐标变换之间的欧几里得距离
+ * 
+ * @param tf1 第一个坐标变换
+ * @param tf2 第二个坐标变换
+ * @return 返回两坐标变换之间的欧几里得距离
+ */
+double SensePositionNode::CalculateDistance(geometry_msgs::msg::TransformStamped& tf1,
+                                          geometry_msgs::msg::TransformStamped& tf2) {
+  double x1 = tf1.transform.translation.x;
+  double y1 = tf1.transform.translation.y;
+  double x2 = tf2.transform.translation.x;
+  double y2 = tf2.transform.translation.y;
+  double distance = std::sqrt(std::pow(x1 - x2, 2) + std::pow(y1 - y2, 2));
+  return distance;
 }
