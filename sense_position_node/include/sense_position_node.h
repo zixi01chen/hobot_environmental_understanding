@@ -26,6 +26,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/logging.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "sensor_msgs/msg/region_of_interest.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/static_transform_broadcaster_node.hpp"
@@ -116,6 +117,10 @@ class SensePositionNode : public rclcpp::Node {
   double CalculateDistance(geometry_msgs::msg::TransformStamped& tf1,
                         geometry_msgs::msg::TransformStamped& tf2);
 
+  // // 计算IOU
+  // bool CheckIOU(sensor_msgs::msg::RegionOfInterest& rect1, 
+  //                   sensor_msgs::msg::RegionOfInterest& rect2);
+
  private:
 
   std::shared_ptr<std::thread> listener_thread_ = nullptr;
@@ -149,6 +154,10 @@ class SensePositionNode : public rclcpp::Node {
                       std::vector<geometry_msgs::msg::TransformStamped>,
                       compare_tf> tf_msgs_;
   
+  // std::priority_queue<ai_msgs::msg::PerceptionTargets::SharedPtr,
+  //                     std::vector<ai_msgs::msg::PerceptionTargets::SharedPtr>,
+  //                     compare_msg> filter_smart_msgs_;
+
   geometry_msgs::msg::TransformStamped current_position_;
   std::vector<geometry_msgs::msg::TransformStamped> targetTFs_;
 

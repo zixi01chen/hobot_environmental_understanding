@@ -319,7 +319,7 @@ int SensePositionNode::Listener() {
   while (rclcpp::ok() && !echoListener.buffer_.canTransform(
     source_frameid, target_frameid, tf2::TimePoint(), &warning_msg))
   {
-    RCLCPP_INFO_THROTTLE(nh->get_logger(), *clock, 1000, "等待坐标变换 %s ->  %s: %s",
+    RCLCPP_INFO_THROTTLE(nh->get_logger(), *clock, 1000, "Waiting for transform %s ->  %s: %s",
       source_frameid.c_str(), target_frameid.c_str(), warning_msg.c_str());
     rate.sleep();
   }
@@ -421,6 +421,49 @@ void SensePositionNode::DepthImgTopicCallback(
  */
 void SensePositionNode::SmartTopicCallback(
     const ai_msgs::msg::PerceptionTargets::SharedPtr msg) {
+  
+  // filter_smart_msgs_.push(msg);
+  // if (filter_smart_msgs_.size() < 4) {
+  //   return;
+  // }
+
+  // std::queue<ai_msgs::msg::PerceptionTargets::SharedPtr> tmp_smart_msgs;
+  // ai_msgs::msg::PerceptionTargets::SharedPtr avg_msg;
+
+  // for (const auto& tar : msg->targets) {
+  //   auto rect1 = tar.rois[0].rect;
+  //   std::string type1 = tar.rois[0].type;
+  //   int count = 0;
+
+  //   while (!filter_smart_msgs_.empty()) {
+  //     auto smart_msg = filter_smart_msgs_.top();
+  //     tmp_smart_msgs.push(smart_msg);
+  //     filter_smart_msgs_.pop();
+  //     for (const auto& tmp_tar : smart_msg->targets) {
+  //       auto rect2 = tmp_tar.rois[0].rect;
+  //       std::string type2 = tmp_tar.rois[0].type;
+  //       if (type1 == type2 && CheckIOU(rect1, rect2)) {
+  //         count++;
+  //         break;
+  //       }
+  //     }
+  //   }
+
+  //   std::cout << "type: " << type1 << " count: " << count << std::endl;
+  //   if (count >= 2) {
+  //     avg_msg->targets.push_back(tar);
+  //   }
+  //   std::cout << "targets size: " << avg_msg->targets.size() << std::endl;
+
+  //   while (!tmp_smart_msgs.empty()) {
+  //     auto smart_msg = tmp_smart_msgs.front();
+  //     filter_smart_msgs_.push(smart_msg);
+  //     tmp_smart_msgs.pop();
+  //   }
+  // }
+  // filter_smart_msgs_.pop();
+  
+
   {
     // 使用互斥锁确保对消息队列的安全访问
     std::unique_lock<std::mutex> lock(map_smart_mutex_);
@@ -504,29 +547,41 @@ int SensePositionNode::CorrectTransform(geometry_msgs::msg::TransformStamped& te
   tempTF.transform.rotation.z = sin(theta / 2.0);
   tempTF.transform.rotation.w = cos(theta / 2.0);
 
-  // 遍历目标坐标系列表
-  for (auto targetTF : targetTFs_) {
-    // 判断修正后的坐标变换是否与已知坐标系匹配
-    if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id) && CheckSameTransform(tempTF, targetTF)) {
-      // 若匹配，则更新坐标系标识和位置信息（取平均）
-      tempTF.child_frame_id = targetTF.child_frame_id;
-      tempTF.transform.translation.x = (tempTF.transform.translation.x + targetTF.transform.translation.x) / 2;
-      tempTF.transform.translation.y = (tempTF.transform.translation.y + targetTF.transform.translation.y) / 2;
-      tempTF.transform.translation.z = (tempTF.transform.translation.z + targetTF.transform.translation.z) / 2;
+  // // 遍历目标坐标系列表
+  // for (auto targetTF : targetTFs_) {
+  //   // 判断修正后的坐标变换是否与已知坐标系匹配
+  //   if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id) && CheckSameTransform(tempTF, targetTF)) {
+  //     // 若匹配，则更新坐标系标识和位置信息（取平均）
+  //     tempTF.child_frame_id = targetTF.child_frame_id;
+  //     tempTF.transform.translation.x = (tempTF.transform.translation.x + targetTF.transform.translation.x) / 2;
+  //     tempTF.transform.translation.y = (tempTF.transform.translation.y + targetTF.transform.translation.y) / 2;
+  //     tempTF.transform.translation.z = (tempTF.transform.translation.z + targetTF.transform.translation.z) / 2;
+  //     return 0;
+  //   }
+  // }
+
+  // // 若未找到匹配的已知坐标系，生成新的坐标系标识
+  // int count = 0;
+  // for (auto targetTF : targetTFs_) {
+  //   if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id)) {
+  //     count++;
+  //   }
+  // }
+  // if (count != 0) {
+  //   tempTF.child_frame_id = tempTF.child_frame_id + "_" + std::to_string(count);
+  // } 
+
+
+  if (targetTFs_.empty()) {
+    targetTFs_.push_back(tempTF);
+    return 0;
+  }
+
+  for (auto targetTF: targetTFs_) {
+    if (targetTF.child_frame_id == tempTF.child_frame_id) {
       return 0;
     }
   }
-
-  // 若未找到匹配的已知坐标系，生成新的坐标系标识
-  int count = 0;
-  for (auto targetTF : targetTFs_) {
-    if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id)) {
-      count++;
-    }
-  }
-  if (count != 0) {
-    tempTF.child_frame_id = tempTF.child_frame_id + "_" + std::to_string(count);
-  } 
 
   // 将修正后的坐标变换添加到目标坐标系列表
   targetTFs_.push_back(tempTF);
@@ -558,9 +613,6 @@ bool SensePositionNode::CheckSameTransform(geometry_msgs::msg::TransformStamped&
   // 计算两坐标变换之间的欧几里得距离
   double distance = CalculateDistance(tf1, tf2);
 
-  // 打印调试信息，显示两坐标变换之间的距离
-  std::cout << tf1.child_frame_id << " " << tf2.child_frame_id << " distance: " << distance << std::endl;
-
   // 判断距离是否小于重叠阈值，若是，则认为相似
   if (distance < overlap_threshold) {
     return true;
@@ -587,3 +639,20 @@ double SensePositionNode::CalculateDistance(geometry_msgs::msg::TransformStamped
   double distance = std::sqrt(std::pow(x1 - x2, 2) + std::pow(y1 - y2, 2));
   return distance;
 }
+
+
+// bool SensePositionNode::CheckIOU(sensor_msgs::msg::RegionOfInterest& rect1, 
+//                                     sensor_msgs::msg::RegionOfInterest& rect2) {
+    
+//     uint32_t x1 = std::max(rect1.x_offset, rect2.x_offset);
+//     uint32_t y1 = std::max(rect1.y_offset, rect2.y_offset);
+//     uint32_t x2 = std::min(rect1.x_offset + rect1.width, rect2.x_offset + rect2.width);
+//     uint32_t y2 = std::min(rect1.y_offset + rect1.height, rect2.y_offset + rect2.height);
+
+//     double intersection = std::max(0.0, static_cast<double>(x2 - x1)) * std::max(0.0, static_cast<double>(y2 - y1));
+//     double union_area = rect1.width * rect1.height + rect2.width * rect2.height - intersection;
+
+//     double iou = intersection / union_area;
+    
+//     return iou > 0.7;
+// }
