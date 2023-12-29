@@ -117,9 +117,9 @@ class SensePositionNode : public rclcpp::Node {
   double CalculateDistance(geometry_msgs::msg::TransformStamped& tf1,
                         geometry_msgs::msg::TransformStamped& tf2);
 
-  // // 计算IOU
-  // bool CheckIOU(sensor_msgs::msg::RegionOfInterest& rect1, 
-  //                   sensor_msgs::msg::RegionOfInterest& rect2);
+  // 计算IOU
+  bool CheckIOU(sensor_msgs::msg::RegionOfInterest& rect1, 
+                    sensor_msgs::msg::RegionOfInterest& rect2);
 
  private:
 
@@ -154,9 +154,9 @@ class SensePositionNode : public rclcpp::Node {
                       std::vector<geometry_msgs::msg::TransformStamped>,
                       compare_tf> tf_msgs_;
   
-  // std::priority_queue<ai_msgs::msg::PerceptionTargets::SharedPtr,
-  //                     std::vector<ai_msgs::msg::PerceptionTargets::SharedPtr>,
-  //                     compare_msg> filter_smart_msgs_;
+  std::priority_queue<ai_msgs::msg::PerceptionTargets::SharedPtr,
+                      std::vector<ai_msgs::msg::PerceptionTargets::SharedPtr>,
+                      compare_msg> filter_smart_msgs_;
 
   geometry_msgs::msg::TransformStamped current_position_;
   std::vector<geometry_msgs::msg::TransformStamped> targetTFs_;

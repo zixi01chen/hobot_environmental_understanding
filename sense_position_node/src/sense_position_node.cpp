@@ -218,7 +218,17 @@ void SensePositionNode::MessageProcess() {
   }
 }
 
-
+/**
+ * @brief 更新坐标变换并广播目标框架之间的变换关系
+ *
+ * 此函数基于传感器数据和目标检测结果，计算并更新每个目标框架相对于参考框架的坐标变换。
+ * 然后通过tf2库将这些变换关系广播到ROS 2的变换树中。
+ *
+ * @param frame_msg 传感器数据，Image消息类型
+ * @param smart_msg 智能感知消息，PerceptionTargets消息类型
+ * @param map_base_transform 传感器坐标系到参考坐标系的变换
+ * @return 返回0表示成功，非0表示失败
+ */
 int SensePositionNode::UpdateTransform(sensor_msgs::msg::Image::SharedPtr frame_msg, 
                   ai_msgs::msg::PerceptionTargets::SharedPtr smart_msg,
                   geometry_msgs::msg::TransformStamped map_base_transform) {
@@ -279,7 +289,7 @@ int SensePositionNode::UpdateTransform(sensor_msgs::msg::Image::SharedPtr frame_
       auto rotation = map_target_transform.transform.rotation;
 
       ss << "- Target Frame: " << map_target_transform.child_frame_id << "\n";
-      ss << "- Header: [" << map_target_transform.header.stamp.sec << " " << map_target_transform.header.stamp.nanosec << "\n";
+      ss << "- Header: [" << map_target_transform.header.stamp.sec << "_  " << map_target_transform.header.stamp.nanosec << "]" <<"\n";
       ss << "- Translation: [" << translation.x << ", " << translation.y << ", " << translation.z << "]" << "\n";
       ss << "- Rotation: in Quaternion [" << rotation.x << ", " << rotation.y << ", " 
                 << rotation.z << ", " << rotation.w << "]" << "\n";
@@ -422,46 +432,45 @@ void SensePositionNode::DepthImgTopicCallback(
 void SensePositionNode::SmartTopicCallback(
     const ai_msgs::msg::PerceptionTargets::SharedPtr msg) {
   
-  // filter_smart_msgs_.push(msg);
-  // if (filter_smart_msgs_.size() < 4) {
-  //   return;
-  // }
+  filter_smart_msgs_.push(msg);
+  if (filter_smart_msgs_.size() < 2) {
+    return;
+  }
 
-  // std::queue<ai_msgs::msg::PerceptionTargets::SharedPtr> tmp_smart_msgs;
-  // ai_msgs::msg::PerceptionTargets::SharedPtr avg_msg;
+  std::queue<ai_msgs::msg::PerceptionTargets::SharedPtr> tmp_smart_msgs;
+  ai_msgs::msg::PerceptionTargets::SharedPtr avg_msg = std::make_shared<ai_msgs::msg::PerceptionTargets>();
 
-  // for (const auto& tar : msg->targets) {
-  //   auto rect1 = tar.rois[0].rect;
-  //   std::string type1 = tar.rois[0].type;
-  //   int count = 0;
+  for (const auto& tar : msg->targets) {
+    auto rect1 = tar.rois[0].rect;
+    std::string type1 = tar.rois[0].type;
+    float confidence1 = tar.rois[0].confidence;
+    int count = 0;
 
-  //   while (!filter_smart_msgs_.empty()) {
-  //     auto smart_msg = filter_smart_msgs_.top();
-  //     tmp_smart_msgs.push(smart_msg);
-  //     filter_smart_msgs_.pop();
-  //     for (const auto& tmp_tar : smart_msg->targets) {
-  //       auto rect2 = tmp_tar.rois[0].rect;
-  //       std::string type2 = tmp_tar.rois[0].type;
-  //       if (type1 == type2 && CheckIOU(rect1, rect2)) {
-  //         count++;
-  //         break;
-  //       }
-  //     }
-  //   }
+    while (!filter_smart_msgs_.empty()) {
+      auto smart_msg = filter_smart_msgs_.top();
+      tmp_smart_msgs.push(smart_msg);
+      filter_smart_msgs_.pop();
+      for (const auto& tmp_tar : smart_msg->targets) {
+        auto rect2 = tmp_tar.rois[0].rect;
+        std::string type2 = tmp_tar.rois[0].type;
+        if (type1 == type2 && CheckIOU(rect1, rect2)) {
+          count++;
+          break;
+        }
+      }
+    }
 
-  //   std::cout << "type: " << type1 << " count: " << count << std::endl;
-  //   if (count >= 2) {
-  //     avg_msg->targets.push_back(tar);
-  //   }
-  //   std::cout << "targets size: " << avg_msg->targets.size() << std::endl;
+    if (count >= 1) {
+      avg_msg->targets.emplace_back(std::move(tar));
+    }
 
-  //   while (!tmp_smart_msgs.empty()) {
-  //     auto smart_msg = tmp_smart_msgs.front();
-  //     filter_smart_msgs_.push(smart_msg);
-  //     tmp_smart_msgs.pop();
-  //   }
-  // }
-  // filter_smart_msgs_.pop();
+    while (!tmp_smart_msgs.empty()) {
+      auto smart_msg = tmp_smart_msgs.front();
+      filter_smart_msgs_.push(smart_msg);
+      tmp_smart_msgs.pop();
+    }
+  }
+  filter_smart_msgs_.pop();
   
 
   {
@@ -530,6 +539,7 @@ int SensePositionNode::CalculateTransform(int x, int y, float depth_value, geome
   return 0;
 }
 
+
 /**
  * @brief 修正坐标变换的函数
  * 
@@ -547,41 +557,29 @@ int SensePositionNode::CorrectTransform(geometry_msgs::msg::TransformStamped& te
   tempTF.transform.rotation.z = sin(theta / 2.0);
   tempTF.transform.rotation.w = cos(theta / 2.0);
 
-  // // 遍历目标坐标系列表
-  // for (auto targetTF : targetTFs_) {
-  //   // 判断修正后的坐标变换是否与已知坐标系匹配
-  //   if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id) && CheckSameTransform(tempTF, targetTF)) {
-  //     // 若匹配，则更新坐标系标识和位置信息（取平均）
-  //     tempTF.child_frame_id = targetTF.child_frame_id;
-  //     tempTF.transform.translation.x = (tempTF.transform.translation.x + targetTF.transform.translation.x) / 2;
-  //     tempTF.transform.translation.y = (tempTF.transform.translation.y + targetTF.transform.translation.y) / 2;
-  //     tempTF.transform.translation.z = (tempTF.transform.translation.z + targetTF.transform.translation.z) / 2;
-  //     return 0;
-  //   }
-  // }
-
-  // // 若未找到匹配的已知坐标系，生成新的坐标系标识
-  // int count = 0;
-  // for (auto targetTF : targetTFs_) {
-  //   if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id)) {
-  //     count++;
-  //   }
-  // }
-  // if (count != 0) {
-  //   tempTF.child_frame_id = tempTF.child_frame_id + "_" + std::to_string(count);
-  // } 
-
-
-  if (targetTFs_.empty()) {
-    targetTFs_.push_back(tempTF);
-    return 0;
-  }
-
-  for (auto targetTF: targetTFs_) {
-    if (targetTF.child_frame_id == tempTF.child_frame_id) {
+  // 遍历目标坐标系列表
+  for (auto targetTF : targetTFs_) {
+    // 判断修正后的坐标变换是否与已知坐标系匹配
+    if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id) && CheckSameTransform(tempTF, targetTF)) {
+      // 若匹配，则更新坐标系标识和位置信息（取平均）
+      tempTF.child_frame_id = targetTF.child_frame_id;
+      tempTF.transform.translation.x = (tempTF.transform.translation.x + targetTF.transform.translation.x) / 2;
+      tempTF.transform.translation.y = (tempTF.transform.translation.y + targetTF.transform.translation.y) / 2;
+      tempTF.transform.translation.z = (tempTF.transform.translation.z + targetTF.transform.translation.z) / 2;
       return 0;
     }
   }
+
+  // 若未找到匹配的已知坐标系，生成新的坐标系标识
+  int count = 0;
+  for (auto targetTF : targetTFs_) {
+    if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id)) {
+      count++;
+    }
+  }
+  if (count != 0) {
+    tempTF.child_frame_id = tempTF.child_frame_id + "_" + std::to_string(count);
+  } 
 
   // 将修正后的坐标变换添加到目标坐标系列表
   targetTFs_.push_back(tempTF);
@@ -641,18 +639,30 @@ double SensePositionNode::CalculateDistance(geometry_msgs::msg::TransformStamped
 }
 
 
-// bool SensePositionNode::CheckIOU(sensor_msgs::msg::RegionOfInterest& rect1, 
-//                                     sensor_msgs::msg::RegionOfInterest& rect2) {
-    
-//     uint32_t x1 = std::max(rect1.x_offset, rect2.x_offset);
-//     uint32_t y1 = std::max(rect1.y_offset, rect2.y_offset);
-//     uint32_t x2 = std::min(rect1.x_offset + rect1.width, rect2.x_offset + rect2.width);
-//     uint32_t y2 = std::min(rect1.y_offset + rect1.height, rect2.y_offset + rect2.height);
+/**
+ * @brief 检查两个矩形区域的交并比（Intersection over Union，简称IOU）是否显著
+ * 
+ * 交并比（IOU）是衡量两个矩形区域重叠程度的指标。本函数计算给定两个矩形区域的IOU值，
+ * 并通过阈值判断它们是否有显著的重叠。
+ * 
+ * @param rect1 第一个矩形区域
+ * @param rect2 第二个矩形区域
+ * @return 如果IOU大于0.7，则返回true，表示显著的重叠；否则返回false
+ */
+bool SensePositionNode::CheckIOU(sensor_msgs::msg::RegionOfInterest& rect1, 
+                                    sensor_msgs::msg::RegionOfInterest& rect2) {
+    // 计算两个矩形区域的交集坐标
+    uint32_t x1 = std::max(rect1.x_offset, rect2.x_offset);
+    uint32_t y1 = std::max(rect1.y_offset, rect2.y_offset);
+    uint32_t x2 = std::min(rect1.x_offset + rect1.width, rect2.x_offset + rect2.width);
+    uint32_t y2 = std::min(rect1.y_offset + rect1.height, rect2.y_offset + rect2.height);
 
-//     double intersection = std::max(0.0, static_cast<double>(x2 - x1)) * std::max(0.0, static_cast<double>(y2 - y1));
-//     double union_area = rect1.width * rect1.height + rect2.width * rect2.height - intersection;
+    // 计算交集和并集的面积
+    double intersection = std::max(0.0, static_cast<double>(x2 - x1)) * std::max(0.0, static_cast<double>(y2 - y1));
+    double union_area = rect1.width * rect1.height + rect2.width * rect2.height - intersection;
 
-//     double iou = intersection / union_area;
+    // 计算交并比（IOU
+    double iou = intersection / union_area;
     
-//     return iou > 0.7;
-// }
+    return iou > 0.7;
+}
