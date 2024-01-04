@@ -27,6 +27,7 @@
 #include "rclcpp/logging.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/region_of_interest.hpp"
+#include "tf2_eigen/tf2_eigen.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/static_transform_broadcaster_node.hpp"
@@ -93,7 +94,7 @@ class SensePositionNode : public rclcpp::Node {
   int Listener();
 
   // 发布TF订阅消息
-  int Broadcaster(geometry_msgs::msg::TransformStamped tf_msg);
+  int Broadcaster();
 
   // 消息处理程序
   void MessageProcess();
@@ -121,6 +122,12 @@ class SensePositionNode : public rclcpp::Node {
   bool CheckIOU(sensor_msgs::msg::RegionOfInterest& rect1, 
                     sensor_msgs::msg::RegionOfInterest& rect2);
 
+  void Test();
+
+  // 检查相机视野中目标是否可见
+  bool InView(geometry_msgs::msg::TransformStamped& map_targrt_transform,
+              geometry_msgs::msg::TransformStamped& map_base_transform);
+
  private:
 
   std::shared_ptr<std::thread> listener_thread_ = nullptr;
@@ -135,6 +142,7 @@ class SensePositionNode : public rclcpp::Node {
 
   std::string server_name_ = "/get_target_and_position";
   std::string camera_link_name_ = "rgbd_link";
+  bool isFilter = false;
 
   std::string ai_msg_sub_topic_name_ = "/ai_msg_mono2d_trash_detection";
   rclcpp::Subscription<ai_msgs::msg::PerceptionTargets>::SharedPtr

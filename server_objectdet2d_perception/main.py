@@ -65,7 +65,8 @@ class ImageSubscriber(Node):
 
     self.subscription
 
-    self.text_prompts = ["trashcan", "round"]
+    # self.text_prompts = ["trashcan", "round"]
+    self.text_prompts = ["trashcan;round"]
     self.last_time = time.time()
     self.publisher = self.create_publisher(PerceptionTargets, '/ai_msg_mono2d_trash_detection', 10)
 
@@ -130,7 +131,8 @@ class ImageSubscriber(Node):
       res_msgs = []
       for text_prompt in self.text_prompts:
 
-        request_msg={'text_prompt':text_prompt, 'image':img_byte, 'box_threshold':0.7}
+        print("request")
+        request_msg={'text_prompt':text_prompt, 'image':img_byte, 'box_threshold':0.6}
         data = json.dumps(request_msg)  #字典数据结构变json(所有程序语言都认识的字符串)
 
         res = requests.post('http://10.64.29.52:8647', data=data)
@@ -138,7 +140,8 @@ class ImageSubscriber(Node):
         res_msgs.append(res_msg)
         print(res_msg)
 
-      res_msg = self.merge_dicts(res_msgs[0], res_msgs[1])
+      # res_msg = self.merge_dicts(res_msgs[0], res_msgs[1])
+      res_msg = res_msgs[0]
 
       print("merged: ", res_msg)
 
@@ -202,6 +205,8 @@ class ImageSubscriber(Node):
 
       self.publisher.publish(pub_data)
 
+      print("finish")
+
   def depth_callback(self, msg):
 
     # print(msg.header)
@@ -211,11 +216,11 @@ class ImageSubscriber(Node):
       # 保存上一次深度图
       cv.imwrite(os.path.join(self.detection_depth_folder, self.name + '.png'), detection_image)
 
-
 def main(args=None):
   rclpy.init(args=args)
   image_subscriber = ImageSubscriber()
   rclpy.spin(image_subscriber)
+  print("start")
   image_subscriber.destroy_node()
   rclpy.shutdown()
 
