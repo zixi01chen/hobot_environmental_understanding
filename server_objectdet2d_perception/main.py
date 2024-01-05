@@ -2,7 +2,6 @@ import rclpy
 from rclpy.node import Node
 from cv_bridge import CvBridge
 import cv2 as cv
-import uuid
 import os
 import numpy as np
 import datetime
@@ -43,10 +42,10 @@ class ImageSubscriber(Node):
     self.declare_parameter("detection_image_folder","detection_image")
     # 创建CvBridge实例
     self.bridge = CvBridge()
-    self.uuid = -1
     self.detection_image = np.zeros((640, 480, 3))
     self.start_time = time.time()
     self.time_diff_threshold = 1 / self.get_parameter('fps').get_parameter_value().double_value
+    self.name = ""
 
     os.system("rm -rf detection_result")
     os.system("rm -rf detection_image")
@@ -66,11 +65,16 @@ class ImageSubscriber(Node):
 
     self.subscription
 
-    # self.text_prompt = "ball"
-    self.text_prompts = ["trashcan", "round"]
+    self.det_list = ["trashcan", "round"]
+    self.text_prompt = ""
+    for det in self.det_list:
+        self.text_prompt += det + ";"
+    self.text_prompt = self.text_prompt[:-1]
+
+    self.colors = [(0, 0, 255), (255, 0, 0)]
+
     self.last_time = time.time()
     self.publisher = self.create_publisher(PerceptionTargets, '/ai_msg_mono2d_trash_detection', 10)
-
 
   def plot_boxes_to_image_cv(self, image, res_msg):
       # 获取检测框信息
@@ -87,6 +91,9 @@ class ImageSubscriber(Node):
         box[2:] += box[:2]
         # random color
         color = tuple(np.random.randint(0, 255, size=3).tolist())
+        for i, det in enumerate(self.det_list):
+          if set(det).issubset(set(label)):
+              color = self.colors[i]
         # draw
         x0, y0, x1, y1 = box
         x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
@@ -100,23 +107,40 @@ class ImageSubscriber(Node):
         cv.putText(image, text, (x0, y0 - 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, color, thickness)
 
       return image
-
-  def merge_dicts(self, dict1, dict2):
-      """
-      递归合并两个字典，相同键值合并
-      """
-      merged = dict1.copy()
-      for key, value in dict2.items():
-        if key == "boxes":
-          merged[key].extend(value)
-        elif key == "labels":
-          merged[key].extend(value)
-      return merged
     
+  def filterbox(self, res_msg):
+    new_res_msg = dict()
+    new_res_msg['boxes'] = []
+    new_res_msg['labels'] = []
+    new_res_msg['size'] = res_msg['size']
+    H, W = res_msg["size"]
+    for i, box in enumerate(res_msg['boxes']):
+        Box = box * np.array([W, H, W, H])
+        w = Box[2]
+        h = Box[3]
+        # from xywh to xyxy
+        Box[:2] -= Box[2:] / 2
+        Box[2:] += Box[:2]
+
+        # draw
+        x0, y0, x1, y1 = Box
+        x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+
+        if (x0 == 0 or x1 == W) and h > w:
+            break
+
+        new_res_msg['boxes'].append(box)
+        new_res_msg['labels'].append(res_msg['labels'][i])
+
+    return new_res_msg
+
   # sub回调函数
   def listener_callback(self, msg):
     end_time = time.time()
     time_diff = end_time - self.start_time
+
+    self.name = str(msg.header.stamp.sec) + "_" + str(msg.header.stamp.nanosec)
+    
     if time_diff > self.time_diff_threshold:
       self.start_time = end_time
       self.detection_image = self.bridge.imgmsg_to_cv2(msg)
@@ -127,36 +151,29 @@ class ImageSubscriber(Node):
       # 将字节数据转换为 Base64 字符串
       img_byte = base64.b64encode(image_data).decode('utf-8')
 
-      res_msgs = []
-      for text_prompt in self.text_prompts:
+      print("request")
+      request_msg={'text_prompt':self.text_prompt, 'image':img_byte, 'box_threshold':0.65}
+      data = json.dumps(request_msg)  #字典数据结构变json(所有程序语言都认识的字符串)
 
-        request_msg={'text_prompt':text_prompt, 'image':img_byte, 'box_threshold':0.7}
-        data = json.dumps(request_msg)  #字典数据结构变json(所有程序语言都认识的字符串)
+      res = requests.post('http://10.64.29.52:8647', data=data)
+      res_msg = dict(res.json())
 
-        res = requests.post('http://10.64.29.52:8647', data=data)
-        res_msg = dict(res.json())
-        res_msgs.append(res_msg)
-        print(res_msg)
-
-      res_msg = self.merge_dicts(res_msgs[0], res_msgs[1])
-
-      print("merged: ", res_msg)
+      res_msg = self.filterbox(res_msg)
 
       boxes = res_msg['boxes']
       labels = res_msg['labels']
       H, W = res_msg['size']
 
       # draw pic
-      self.uuid = uuid.uuid1()
+      pic_name = str()
       # 保存上一次标定的结果
-      cv.imwrite(os.path.join(self.detection_image_folder, str(self.uuid) + '.jpg'), self.detection_image)
+      cv.imwrite(os.path.join(self.detection_image_folder, self.name + '.jpg'), self.detection_image)
 
       image_with_box = self.plot_boxes_to_image_cv(self.detection_image, res_msg)
-      cv.imwrite(os.path.join(self.detection_result_folder, str(self.uuid) + '.jpg'), image_with_box)
+      cv.imwrite(os.path.join(self.detection_result_folder, self.name + '.jpg'), image_with_box)
       
-      print("Save "+ str(self.uuid) + ".jpg")
+      print("Save "+ self.name + ".jpg")
       # 载入新的图像
-
 
       if boxes != []:
         box = boxes[0] * np.array([W, H, W, H])
@@ -168,10 +185,6 @@ class ImageSubscriber(Node):
         x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
         
         print("box: ", x0, " ", y0, " ", x1, " ", y1)
-
-        targetX = float((480 - y1) / 50)
-        targetY = float((320 - (x0 + x1) / 2) / 100)
-        print("target: ", targetX, targetY)
 
       num = len(boxes)
 
@@ -207,21 +220,22 @@ class ImageSubscriber(Node):
 
       self.publisher.publish(pub_data)
 
+      print("finish")
+
   def depth_callback(self, msg):
 
     # print(msg.header)
     detection_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
     
-    # draw pic
-    t = uuid.uuid1()
-    # 保存上一次标定的结果
-    cv.imwrite(os.path.join(self.detection_depth_folder, str(t) + '.png'), detection_image)
-
+    if self.name != "":
+      # 保存上一次深度图
+      cv.imwrite(os.path.join(self.detection_depth_folder, self.name + '.png'), detection_image)
 
 def main(args=None):
   rclpy.init(args=args)
   image_subscriber = ImageSubscriber()
   rclpy.spin(image_subscriber)
+  print("start")
   image_subscriber.destroy_node()
   rclpy.shutdown()
 
