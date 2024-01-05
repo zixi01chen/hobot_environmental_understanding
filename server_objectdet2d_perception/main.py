@@ -65,8 +65,14 @@ class ImageSubscriber(Node):
 
     self.subscription
 
-    # self.text_prompts = ["trashcan", "round"]
-    self.text_prompts = ["trashcan;round"]
+    self.det_list = ["trashcan", "round"]
+    self.text_prompt = ""
+    for det in self.det_list:
+        self.text_prompt += det + ";"
+    self.text_prompt = self.text_prompt[:-1]
+
+    self.colors = [(0, 0, 255), (255, 0, 0)]
+
     self.last_time = time.time()
     self.publisher = self.create_publisher(PerceptionTargets, '/ai_msg_mono2d_trash_detection', 10)
 
@@ -85,6 +91,9 @@ class ImageSubscriber(Node):
         box[2:] += box[:2]
         # random color
         color = tuple(np.random.randint(0, 255, size=3).tolist())
+        for i, det in enumerate(self.det_list):
+          if set(det).issubset(set(label)):
+              color = self.colors[i]
         # draw
         x0, y0, x1, y1 = box
         x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
@@ -98,19 +107,33 @@ class ImageSubscriber(Node):
         cv.putText(image, text, (x0, y0 - 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, color, thickness)
 
       return image
-
-  def merge_dicts(self, dict1, dict2):
-      """
-      递归合并两个字典，相同键值合并
-      """
-      merged = dict1.copy()
-      for key, value in dict2.items():
-        if key == "boxes":
-          merged[key].extend(value)
-        elif key == "labels":
-          merged[key].extend(value)
-      return merged
     
+  def filterbox(self, res_msg):
+    new_res_msg = dict()
+    new_res_msg['boxes'] = []
+    new_res_msg['labels'] = []
+    new_res_msg['size'] = res_msg['size']
+    H, W = res_msg["size"]
+    for i, box in enumerate(res_msg['boxes']):
+        Box = box * np.array([W, H, W, H])
+        w = Box[2]
+        h = Box[3]
+        # from xywh to xyxy
+        Box[:2] -= Box[2:] / 2
+        Box[2:] += Box[:2]
+
+        # draw
+        x0, y0, x1, y1 = Box
+        x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+
+        if (x0 == 0 or x1 == W) and h > w:
+            break
+
+        new_res_msg['boxes'].append(box)
+        new_res_msg['labels'].append(res_msg['labels'][i])
+
+    return new_res_msg
+
   # sub回调函数
   def listener_callback(self, msg):
     end_time = time.time()
@@ -128,22 +151,14 @@ class ImageSubscriber(Node):
       # 将字节数据转换为 Base64 字符串
       img_byte = base64.b64encode(image_data).decode('utf-8')
 
-      res_msgs = []
-      for text_prompt in self.text_prompts:
+      print("request")
+      request_msg={'text_prompt':self.text_prompt, 'image':img_byte, 'box_threshold':0.65}
+      data = json.dumps(request_msg)  #字典数据结构变json(所有程序语言都认识的字符串)
 
-        print("request")
-        request_msg={'text_prompt':text_prompt, 'image':img_byte, 'box_threshold':0.6}
-        data = json.dumps(request_msg)  #字典数据结构变json(所有程序语言都认识的字符串)
+      res = requests.post('http://10.64.29.52:8647', data=data)
+      res_msg = dict(res.json())
 
-        res = requests.post('http://10.64.29.52:8647', data=data)
-        res_msg = dict(res.json())
-        res_msgs.append(res_msg)
-        print(res_msg)
-
-      # res_msg = self.merge_dicts(res_msgs[0], res_msgs[1])
-      res_msg = res_msgs[0]
-
-      print("merged: ", res_msg)
+      res_msg = self.filterbox(res_msg)
 
       boxes = res_msg['boxes']
       labels = res_msg['labels']

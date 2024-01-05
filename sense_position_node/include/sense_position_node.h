@@ -142,7 +142,7 @@ class SensePositionNode : public rclcpp::Node {
 
   std::string server_name_ = "/get_target_and_position";
   std::string camera_link_name_ = "rgbd_link";
-  bool isFilter = false;
+  bool isFilter_ = false;
 
   std::string ai_msg_sub_topic_name_ = "/ai_msg_mono2d_trash_detection";
   rclcpp::Subscription<ai_msgs::msg::PerceptionTargets>::SharedPtr

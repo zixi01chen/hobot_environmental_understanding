@@ -660,7 +660,7 @@ int SensePositionNode::CorrectTransform(geometry_msgs::msg::TransformStamped& te
   for (auto& targetTF : targetTFs_) {
     if (isSubset(tempTF.child_frame_id, targetTF.child_frame_id)) {
       if (count != 0) {
-        targetTF.child_frame_id = targetTF.child_frame_id + "_" + std::to_string(count);
+        targetTF.child_frame_id = tempTF.child_frame_id + "_" + std::to_string(count);
       }
       count++;
     }
@@ -690,7 +690,7 @@ bool SensePositionNode::CheckSameTransform(geometry_msgs::msg::TransformStamped&
 
   // 根据坐标变换类型调整重叠阈值
   std::string type = tf1.child_frame_id;
-  if (type == "trash_frame") {
+  if (type == "trashcan_frame") {
     overlap_threshold = 1.0;
   } else if (type == "round_frame") {
     overlap_threshold = 0.2;
@@ -793,7 +793,7 @@ bool SensePositionNode::InView(geometry_msgs::msg::TransformStamped& map_targrt_
   auto rotation = base_target_transform.transform.rotation;
 
   // 检查目标是否在相机视野内，满足条件则返回true，否则返回false
-  if (translation.x > 0 && (translation.y <= 2.0 || translation.y >= -2.0)) {
+  if (translation.x < 2.0 && translation.x >= abs(translation.y)) {
     return true;
   }
 
